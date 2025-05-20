@@ -62,6 +62,11 @@ contract PrimarySale is AccessControl, ReentrancyGuard, Pausable {
     error CannotRecoverMainToken();
     error NoTokensToRecover();
 
+    /// @dev Thrown for sale status errors
+    error SaleNotCancelled();
+    error SaleAlreadyCancelled();
+    error USDAlreadyClaimed(address account);
+
     // Constants
     uint8 internal constant NORMALIZATION_DECIMALS = 18;
 
@@ -81,7 +86,11 @@ contract PrimarySale is AccessControl, ReentrancyGuard, Pausable {
     uint256 public totalNormalizedUSD; // Total USD collected, normalized to 18 decimals
     bool public hasDistributedUSD;
     bool public canMintTokens;
+    bool public isSaleCancelled;
     uint256 public totalShares; // Total number of shares to be distributed (used for calculating token allocation)
+    
+    // Mappings to track USD claims
+    mapping(address => bool) public hasClaimedUSD;
 
     // ============ Events ============
     event ContributionReceived(address indexed contributor, address indexed usdToken, uint256 amount, uint256 normalizedAmount, uint256 totalNormalizedForUser);
@@ -91,6 +100,8 @@ contract PrimarySale is AccessControl, ReentrancyGuard, Pausable {
     event TotalSharesUpdated(uint256 oldValue, uint256 newValue);
     event USDTokenAdded(address indexed usdToken);
     event USDTokenRemoved(address indexed usdToken);
+    event SaleCancelled();
+    event USDClaimed(address indexed contributor, address indexed usdToken, uint256 amount);
 
     // ============ Constructor ============
     /**
@@ -342,6 +353,46 @@ contract PrimarySale is AccessControl, ReentrancyGuard, Pausable {
         token.mint(msg.sender, tokenAmount);
 
         emit TokensClaimed(msg.sender, tokenAmount);
+    }
+
+    /**
+     * @dev Allows admin to cancel the sale, enabling USD claims
+     */
+    function cancelSale() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (hasDistributedUSD) revert USDAlreadyDistributed();
+        if (isSaleCancelled) revert SaleAlreadyCancelled();
+        
+        isSaleCancelled = true;
+        emit SaleCancelled();
+    }
+
+    /**
+     * @dev Allows users to claim back their USD contributions if sale is cancelled
+     */
+    function claimUSD() external whenNotPaused nonReentrant {
+        if (!isSaleCancelled) revert SaleNotCancelled();
+        if (hasClaimedUSD[msg.sender]) revert USDAlreadyClaimed(msg.sender);
+        if (normalizedContributions[msg.sender] == 0) revert NoContribution(msg.sender);
+
+        // Get the user's primary USD token and contribution
+        address usdToken = primaryContributionToken[msg.sender];
+        uint256 contributionAmount = usdContributionsByToken[msg.sender][usdToken];
+        
+        // Ensure we have valid data
+        if (usdToken == address(0) || contributionAmount == 0) revert NoContribution(msg.sender);
+
+        // Mark as claimed before transfer to prevent reentrancy
+        hasClaimedUSD[msg.sender] = true;
+
+        // Reset contribution status
+        delete usdContributionsByToken[msg.sender][usdToken];
+        delete normalizedContributions[msg.sender];
+        delete primaryContributionToken[msg.sender];
+
+        // Transfer USD tokens back to user
+        IERC20(usdToken).safeTransfer(msg.sender, contributionAmount);
+
+        emit USDClaimed(msg.sender, usdToken, contributionAmount);
     }
 
     // View functions
